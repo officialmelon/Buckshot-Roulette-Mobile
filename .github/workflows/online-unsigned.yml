@@ -1,0 +1,139 @@
+name: Online iOS Unsigned Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "online-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: online-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  server-check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: online_server
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: online_server/package-lock.json
+      - name: Install and validate authoritative server
+        run: |
+          npm install --no-audit --no-fund
+          node --check src/server.js
+          node --check src/game-state.js
+      - name: Start server smoke test
+        env:
+          PORT: 8099
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+        run: |
+          node src/server.js > /tmp/buckshot-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for i in {1..20}; do curl -fsS http://127.0.0.1:8099/ && break || sleep 1; done
+          test -s /tmp/buckshot-server.log
+
+  ios-unsigned:
+    needs: server-check
+    runs-on: macos-13
+    env:
+      GODOT_VERSION: "4.3"
+      EXPORT_PRESET_IOS: "iOS"
+      EXPORT_DIR_IOS: "build/ios"
+      ARCHIVE_PATH: "build/BuckshotOnline.xcarchive"
+      IPA_NAME: "Buckshot-Online-Unsigned-${{ github.sha }}.ipa"
+      DEPLOYMENT_TARGET: "12.0"
+      ONLINE_SERVER_URL: ${{ vars.ONLINE_SERVER_URL }}
+      LIVEKIT_URL: ${{ vars.LIVEKIT_URL }}
+    steps:
+      - name: Checkout with LFS
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install Godot 4.3 and export templates
+        run: |
+          set -euxo pipefail
+          mkdir -p tools/godot
+          cd tools/godot
+          curl -L --fail -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
+          unzip -q godot.zip
+          mv Godot.app/Contents/MacOS/Godot Godot
+          chmod +x Godot
+          cd -
+          TEMPLATES_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "${TEMPLATES_DIR}"
+          curl -L --fail -o templates.tpz "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          unzip -q templates.tpz -d templates_unpacked
+          cp -R templates_unpacked/templates/* "${TEMPLATES_DIR}/"
+
+      - name: Configure online endpoint and microphone permission
+        env:
+          ONLINE_SERVER_URL: ${{ env.ONLINE_SERVER_URL }}
+          LIVEKIT_URL: ${{ env.LIVEKIT_URL }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          p = Path("project.godot")
+          text = p.read_text()
+          if "[online]" in text:
+              before, rest = text.split("[online]", 1)
+              block, *tail = rest.split("[", 1)
+              block = 'server_url="%s"\nlivekit_url="%s"\n' % (os.environ.get("ONLINE_SERVER_URL", ""), os.environ.get("LIVEKIT_URL", "wss://qrm-63tzw7ds.livekit.cloud"))
+              text = before + "[online]\n" + block + ("[" + tail[0] if tail else "")
+          else:
+              text += '\n[online]\nserver_url="%s"\nlivekit_url="%s"\n' % (os.environ.get("ONLINE_SERVER_URL", ""), os.environ.get("LIVEKIT_URL", "wss://qrm-63tzw7ds.livekit.cloud"))
+          p.write_text(text)
+          ep = Path("export_presets.cfg")
+          et = ep.read_text().replace('privacy/microphone_usage_description=""', 'privacy/microphone_usage_description="Buckshot Roulette needs microphone access for in-game voice chat."')
+          ep.write_text(et)
+          PY
+
+      - name: Export iOS Xcode project
+        run: |
+          set -euxo pipefail
+          mkdir -p "${EXPORT_DIR_IOS}"
+          tools/godot/Godot --headless --path . --export-release "${EXPORT_PRESET_IOS}" "${EXPORT_DIR_IOS}"
+
+      - name: Build unsigned iOS archive
+        run: |
+          set -euxo pipefail
+          PROJ_BUNDLE="$(find build -type d -name '*.xcodeproj' -print -quit)"
+          test -n "${PROJ_BUNDLE}"
+          PBX="${PROJ_BUNDLE}/project.pbxproj"
+          perl -0777 -pe "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/IPHONEOS_DEPLOYMENT_TARGET = ${DEPLOYMENT_TARGET};/g" -i "${PBX}"
+          SCHEME="$(xcodebuild -list -json -project "${PROJ_BUNDLE}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project"]["schemes"][0])')"
+          xcodebuild -project "${PROJ_BUNDLE}" -scheme "${SCHEME}" -configuration Release -archivePath "${ARCHIVE_PATH}" -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO clean archive
+
+      - name: Package unsigned IPA
+        run: |
+          set -euxo pipefail
+          APP_PATH="$(find "${ARCHIVE_PATH}/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "${APP_PATH}"
+          rm -rf Payload "${IPA_NAME}"
+          mkdir Payload
+          cp -R "${APP_PATH}" Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload "${IPA_NAME}"
+          unzip -l "${IPA_NAME}" | head -20
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: buckshot-online-unsigned-${{ github.sha }}
+          path: ${{ env.IPA_NAME }}
+          if-no-files-found: error
+          retention-days: 14

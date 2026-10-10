@@ -1,0 +1,14 @@
+{
+  "name": "buckshot-online-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "livekit-server-sdk": "^2.19.1",
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0"
+  }
+}

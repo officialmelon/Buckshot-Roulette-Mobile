@@ -1,0 +1,84 @@
+workflows:
+  ios_online_unsigned:
+    name: Buckshot Online iOS Unsigned
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    triggering:
+      events:
+        - push
+      branch_patterns:
+        - pattern: online-unsigned-build
+          include: true
+          source: true
+    environment:
+      vars:
+        GODOT_VERSION: 4.3
+        GODOT_PRESET: iOS
+        EXPORT_DIR: build/ios
+        ARCHIVE_PATH: build/BuckshotOnline.xcarchive
+        IPA_NAME: Buckshot-Online-Unsigned.ipa
+        IOS_DEPLOYMENT_TARGET: 12.0
+      xcode: latest
+    scripts:
+      - name: Install Godot and export templates
+        script: |
+          set -euxo pipefail
+          mkdir -p "$CM_BUILD_DIR/tools/godot"
+          cd "$CM_BUILD_DIR/tools/godot"
+          curl -L --fail -o godot.zip "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
+          unzip -q godot.zip
+          mv Godot.app/Contents/MacOS/Godot Godot
+          chmod +x Godot
+          TEMPLATES_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "$TEMPLATES_DIR"
+          curl -L --fail -o templates.tpz "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          unzip -q templates.tpz -d templates_unpacked
+          cp -R templates_unpacked/templates/* "$TEMPLATES_DIR/"
+          rm -rf templates_unpacked templates.tpz
+      - name: Configure online endpoint and microphone permission
+        script: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('project.godot')
+          text = p.read_text()
+          if '[online]' not in text:
+              text += '\n[online]\nserver_url="wss://8099-i7cq2487uq9didkw3nx87-9e86099e9.sg2.manus.computer"\nlivekit_url="wss://qrm-63tzw7ds.livekit.cloud"\n'
+          ep = Path('export_presets.cfg')
+          et = ep.read_text()
+          et = et.replace('privacy/microphone_usage_description=""', 'privacy/microphone_usage_description="Buckshot Roulette needs microphone access for in-game voice chat."')
+          ep.write_text(et)
+          p.write_text(text)
+          PY
+      - name: Export the iOS Xcode project
+        script: |
+          set -euxo pipefail
+          mkdir -p "$EXPORT_DIR"
+          tools/godot/Godot --headless --path . --export-release "$GODOT_PRESET" "$EXPORT_DIR"
+      - name: Build unsigned Xcode archive
+        script: |
+          set -euxo pipefail
+          PROJ_BUNDLE="$(find build -type d -name '*.xcodeproj' -print -quit)"
+          test -n "$PROJ_BUNDLE"
+          PBX="$PROJ_BUNDLE/project.pbxproj"
+          perl -0777 -pe "s/IPHONEOS_DEPLOYMENT_TARGET = [0-9.]+;/IPHONEOS_DEPLOYMENT_TARGET = ${IOS_DEPLOYMENT_TARGET};/g" -i "$PBX"
+          SCHEME="$(xcodebuild -list -json -project "$PROJ_BUNDLE" | python3 -c 'import json,sys; print(json.load(sys.stdin)["project"]["schemes"][0])')"
+          xcodebuild -project "$PROJ_BUNDLE" -scheme "$SCHEME" -configuration Release -archivePath "$ARCHIVE_PATH" -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO clean archive
+      - name: Package unsigned IPA
+        script: |
+          set -euxo pipefail
+          APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -n "$APP_PATH"
+          rm -rf Payload "$IPA_NAME"
+          mkdir Payload
+          cp -R "$APP_PATH" Payload/
+          ditto -c -k --sequesterRsrc --keepParent Payload "$IPA_NAME"
+          unzip -l "$IPA_NAME" | head -20
+    artifacts:
+      - Buckshot-Online-Unsigned.ipa
+      - build/BuckshotOnline.xcarchive
+      - /tmp/xcodebuild_logs/**/*.log
+    cache:
+      cache_paths:
+        - $HOME/Library/Application Support/Godot/export_templates
+        - $CM_BUILD_DIR/tools/godot
