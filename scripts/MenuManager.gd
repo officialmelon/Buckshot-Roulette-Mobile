@@ -23,6 +23,7 @@ class_name MenuManager extends Node
 @export var anim_creds : AnimationPlayer
 
 func _ready():
+	SetupLan()
 	Show("main")
 	buttons[0].connect("is_pressed", Start)
 	buttons[1].connect("is_pressed", SubOptions)
@@ -69,6 +70,72 @@ func Intro():
 	if (cursor.controller_active): firstFocus_main.grab_focus()
 	controller.previousFocus = firstFocus_main
 	assigningFocus = true
+
+# The LAN entry is added from code so menu.tscn stays untouched.
+var lan_lobby : LanLobby
+func SetupLan():
+	var screen_main = parent_main
+	var start_label : Label = screen_main.get_node("button_start")
+	var start_button : Button = screen_main.get_node("true button_start")
+	var options_button : Button = screen_main.get_node("true button_options")
+	var row = 25.0
+	# make room under START
+	for what in ["options", "credits", "exit"]:
+		screen_main.get_node("button_" + what).position.y += row
+		screen_main.get_node("true button_" + what).position.y += row
+
+	var label : Label = start_label.duplicate()
+	label.name = "button_lan"
+	label.text = "LAN"
+	label.position.y += row
+	screen_main.add_child(label)
+
+	var button = Button.new()
+	button.name = "true button_lan"
+	button.modulate.a = 0
+	button.position = Vector2(options_button.position.x, start_button.position.y + row)
+	button.size = options_button.size
+	button.scale = options_button.scale
+	screen_main.add_child(button)
+
+	var template : ButtonClass = start_button.get_node("button class_start")
+	var logic = ButtonClass.new()
+	logic.cursor = template.cursor
+	logic.alias = "lan"
+	logic.isActive = true
+	logic.isDynamic = true
+	logic.playing = true
+	logic.ui = label
+	logic.speaker_press = buttons[1].speaker_press
+	logic.speaker_hover = template.speaker_hover
+	logic.ui_opacity_active = template.ui_opacity_active
+	button.add_child(logic)
+	logic.connect("is_pressed", Lan)
+	buttons.append(logic)
+	if (!controller.buttons.has(logic) && controller.buttons.has(template)): controller.buttons.append(logic)
+
+	start_button.focus_neighbor_bottom = start_button.get_path_to(button)
+	options_button.focus_neighbor_top = options_button.get_path_to(button)
+	button.focus_neighbor_top = button.get_path_to(start_button)
+	button.focus_neighbor_bottom = button.get_path_to(options_button)
+
+	lan_lobby = LanLobby.new()
+	parent_main.get_parent().add_child(lan_lobby)
+	parent_main.get_parent().move_child(lan_lobby, mouseblocker.get_index())
+	lan_lobby.closed.connect(ReturnFromLan)
+
+func Lan():
+	ResetButtons()
+	Buttons(false)
+	parent_main.visible = false
+	title.visible = false
+	controller.previousFocus = null
+	lan_lobby.Open()
+
+func ReturnFromLan():
+	Buttons(true)
+	Show("main")
+	ResetButtons()
 
 func Buttons(state : bool):
 	if (!state):
