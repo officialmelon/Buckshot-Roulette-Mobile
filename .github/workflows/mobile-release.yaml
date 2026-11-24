@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-13
+    runs-on: macos-15
     env:
       GODOT_VERSION: "4.3"
       EXPORT_PRESET_IOS: "iOS"
